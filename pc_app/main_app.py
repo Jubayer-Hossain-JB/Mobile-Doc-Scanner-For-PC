@@ -4,9 +4,57 @@ import cv2
 import numpy as np
 import time
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QPushButton, QLabel, QSizePolicy)
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QImage, QPixmap
+                             QHBoxLayout, QPushButton, QLabel, QSizePolicy,
+                             QStackedWidget)
+from PyQt5.QtCore import Qt, QTimer, QPropertyAnimation, pyqtProperty
+from PyQt5.QtGui import QImage, QPixmap, QColor
+
+
+# --- Animated Button ---
+class AnimatedButton(QPushButton):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._color = QColor(0, 0, 0)
+
+        self.animation = QPropertyAnimation(self, b"color")
+        self.animation.setDuration(200)
+
+    @pyqtProperty(QColor)
+    def color(self):
+        return self._color
+
+    @color.setter
+    def color(self, color):
+        self._color = color
+        self.update_style()
+
+    def set_colors(self, base_color, hover_color):
+        self.base_color = base_color
+        self.hover_color = hover_color
+        self.color = self.base_color
+
+    def update_style(self):
+        style = f"""
+            background-color: {self._color.name()};
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            font-size: 18px;
+            border-radius: 10px;
+            margin-bottom: 10px;
+            outline: none;
+        """
+        self.setStyleSheet(style)
+
+    def enterEvent(self, event):
+        self.animation.setEndValue(self.hover_color)
+        self.animation.start()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.animation.setEndValue(self.base_color)
+        self.animation.start()
+        super().leaveEvent(event)
 
 
 # --- Frame Simulation Logic (from previous step) ---
@@ -44,35 +92,35 @@ class CustomTitleBar(QWidget):
         super().__init__(parent)
         self.parent = parent
         self.layout = QHBoxLayout()
-        self.layout.setContentsMargins(10, 0, 0, 0)
+        self.layout.setContentsMargins(0, 0, 5, 0)  # L, T, R, B
+        self.layout.setSpacing(10)
 
         self.title = QLabel("Document Scanner")
         self.title.setAlignment(Qt.AlignCenter)
         style = "color: #ecf0f1; font-size: 16px; font-weight: bold;"
         self.title.setStyleSheet(style)
 
+        self.layout.addStretch()
         self.layout.addWidget(self.title)
+        self.layout.addStretch()
 
         self.btn_min = QPushButton("-")
-        self.btn_max = QPushButton("+")
         self.btn_close = QPushButton("×")
 
-        self.btn_min.setFixedSize(30, 30)
-        self.btn_max.setFixedSize(30, 30)
-        self.btn_close.setFixedSize(30, 30)
+        self.btn_min.setFixedSize(26, 26)
+        self.btn_close.setFixedSize(26, 26)
 
         # Apply specific styles for title bar buttons
         buttons = [(self.btn_min, '#f1c40f'),
-                   (self.btn_max, '#2ecc71'),
                    (self.btn_close, '#e74c3c')]
         for btn, bg_color in buttons:
-            darker_color = QPixmap(bg_color).toImage().darker(120).name()
+            darker_color = QColor(bg_color).darker(120).name()
             btn.setStyleSheet(f"""
                 QPushButton {{
                     background-color: {bg_color};
                     color: white;
                     border: none;
-                    border-radius: 15px;
+                    border-radius: 13px;
                     font-weight: bold;
                     font-size: 14px;
                 }}
@@ -82,22 +130,14 @@ class CustomTitleBar(QWidget):
             """)
 
         self.layout.addWidget(self.btn_min)
-        self.layout.addWidget(self.btn_max)
         self.layout.addWidget(self.btn_close)
 
         self.setLayout(self.layout)
 
         self.btn_close.clicked.connect(self.parent.close)
         self.btn_min.clicked.connect(self.parent.showMinimized)
-        self.btn_max.clicked.connect(self.toggle_maximize)
 
         self.start_move_pos = None
-
-    def toggle_maximize(self):
-        if self.parent.isMaximized():
-            self.parent.showNormal()
-        else:
-            self.parent.showMaximized()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -136,62 +176,77 @@ class MainWindow(QMainWindow):
         self.title_bar = CustomTitleBar(self)
         self.container_layout.addWidget(self.title_bar)
 
-        # Main content area
-        self.content_widget = QWidget()
-        self.content_layout = QVBoxLayout(self.content_widget)
-        self.container_layout.addWidget(self.content_widget)
+        # --- Main Content Area using QStackedWidget for different states ---
+        self.stacked_widget = QStackedWidget()
+        self.container_layout.addWidget(self.stacked_widget)
 
-        # Video feed
-        self.video_feed = QLabel("Connecting to device...")
+        # --- "Searching" State Widget ---
+        self.searching_widget = QWidget()
+        self.searching_layout = QVBoxLayout(self.searching_widget)
+        self.searching_label = QLabel("Searching for device...")
+        self.searching_label.setAlignment(Qt.AlignCenter)
+        self.searching_label.setStyleSheet("font-size: 24px; color: #ecf0f1;")
+        self.searching_layout.addWidget(self.searching_label)
+        self.stacked_widget.addWidget(self.searching_widget)
+
+        # --- "Connected" State Widget (Video Feed) ---
+        self.video_widget = QWidget()
+        self.video_widget.setStyleSheet("background-color: transparent;")
+        self.video_layout = QVBoxLayout(self.video_widget)
+        self.video_feed = QLabel()
+        self.video_feed.setObjectName("videoFeed")
         self.video_feed.setAlignment(Qt.AlignCenter)
-        policy = QSizePolicy.Expanding
-        self.video_feed.setSizePolicy(policy, policy)
-        self.content_layout.addWidget(self.video_feed)
+        self.video_feed.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding
+        )
+        self.video_layout.addWidget(self.video_feed)
 
-        # Capture button
-        self.capture_button = QPushButton("Capture")
+        self.capture_button = AnimatedButton("Capture")
+        self.capture_button.set_colors(QColor("#3498db"), QColor("#2980b9"))
         self.capture_button.clicked.connect(self.capture_frame)
-        self.content_layout.addWidget(self.capture_button, 0, Qt.AlignCenter)
+        self.video_layout.addWidget(self.capture_button, 0, Qt.AlignCenter)
+        self.stacked_widget.addWidget(self.video_widget)
 
         self.setStyleSheet("""
             #container {
                 background-color: #2c3e50;
                 border-radius: 15px;
-                border: 2px solid #34495e;
             }
-            #video_feed {
+            CustomTitleBar, #searching_widget {
+                background-color: transparent;
+            }
+            #videoFeed {
                 background-color: black;
                 border-radius: 10px;
                 margin: 10px;
             }
-            QPushButton {
-                background-color: #3498db;
-                color: white;
-                border: none;
-                padding: 15px 30px;
-                font-size: 18px;
-                border-radius: 10px;
-                margin-bottom: 10px;
-            }
-            QPushButton:hover {
-                background-color: #2980b9;
-            }
         """)
 
-        # --- Simulation Setup ---
+        # --- Simulation and State Machine Setup ---
         self.simulator = FrameSimulator()
         self.processor = FrameProcessor()
 
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_frame)
-        self.timer.start(1000 // 30)  # 30 FPS
+        # Timer for video feed
+        self.video_timer = QTimer(self)
+        self.video_timer.timeout.connect(self.update_frame)
+
+        # Timer to simulate connection
+        self.connection_timer = QTimer(self)
+        self.connection_timer.setSingleShot(True)
+        self.connection_timer.timeout.connect(self.on_device_connected)
+        self.connection_timer.start(3000)  # Simulate 3 second connection time
+
+    def on_device_connected(self):
+        print("Device connected!")
+        self.stacked_widget.setCurrentWidget(self.video_widget)
+        self.video_timer.start(1000 // 30)  # 30 FPS
 
     def update_frame(self):
         # Get a frame from the simulator
         self.current_frame = self.simulator.generate_frame()
 
         # Process it (pass-through in simulation)
-        processed_frame = self.processor.process_frame_data(self.current_frame)
+        processed_frame = self.processor.process_data(self.current_frame)
 
         # Convert to QPixmap and display
         h, w, ch = processed_frame.shape
